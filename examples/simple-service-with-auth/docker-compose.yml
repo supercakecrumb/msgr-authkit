@@ -1,0 +1,39 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: auth_example
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web:
+    build:
+      context: ../..
+      dockerfile: examples/simple-service-with-auth/web/Dockerfile
+    environment:
+      APP_ADDR: ":${WEB_PORT:-8080}"
+      DATABASE_URL: postgres://postgres:postgres@postgres:5432/auth_example?sslmode=disable
+      PUBLIC_BASE_URL: http://localhost:${WEB_PORT:-8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token}
+      BOT_USERNAME: ${BOT_USERNAME:-}
+    depends_on:
+      - postgres
+    ports:
+      - "${WEB_PORT:-8080}:${WEB_PORT:-8080}"
+
+  bot:
+    build:
+      context: ../..
+      dockerfile: examples/simple-service-with-auth/bot/Dockerfile
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?set TELEGRAM_BOT_TOKEN in .env}
+      WEB_INTERNAL_BASE_URL: http://web:${WEB_PORT:-8080}
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-dev-internal-token}
+      POLL_TIMEOUT_SECONDS: 25
+    depends_on:
+      - web
+
+volumes:
+  postgres_data:
