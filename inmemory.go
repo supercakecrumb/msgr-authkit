@@ -6,6 +6,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/supercakecrumb/msgr-authkit/internal/cloneutil"
+	"github.com/supercakecrumb/msgr-authkit/internal/timeutil"
 )
 
 // InMemoryIntentStore is a concurrency-safe intent store for local/dev use.
@@ -234,8 +237,8 @@ func copyLink(in AccountLink) AccountLink {
 		Username:        in.Identity.Username,
 		Name:            in.Identity.Name,
 		Surname:         in.Identity.Surname,
-		BirthDate:       copyTime(in.Identity.BirthDate),
-		Attributes:      copyStringMap(in.Identity.Attributes),
+		BirthDate:       cloneutil.TimePtr(in.Identity.BirthDate),
+		Attributes:      cloneutil.StringMap(in.Identity.Attributes),
 	}
 	return out
 }
@@ -291,7 +294,7 @@ func NewInMemorySessionIssuer(ttl time.Duration, opts ...SessionIssuerOption) (*
 
 	issuer := &InMemorySessionIssuer{
 		ttl:      ttl,
-		clock:    systemClock{},
+		clock:    timeutil.SystemClock{},
 		tokenGen: SecureCodeGenerator{NumBytes: 24},
 		idGen:    UUIDGenerator{},
 		byToken:  make(map[string]WebSession),

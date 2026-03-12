@@ -33,7 +33,7 @@ Use `authkit` when you want this flow:
 
 ## Package Structure
 
-- `contract.go`: domain structs and interfaces.
+- `types.go`: domain structs and interfaces.
 - `service.go`: core auth logic (`NewAuthService`, `CreateIntent`, `RedeemIntent`).
 - `inmemory.go`: ready-to-use in-memory adapters for local/dev/tests.
 - `errors.go`: typed sentinel errors for `errors.Is`.

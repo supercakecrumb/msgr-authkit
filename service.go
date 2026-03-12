@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/supercakecrumb/msgr-authkit/internal/cloneutil"
+	"github.com/supercakecrumb/msgr-authkit/internal/timeutil"
 )
 
 // Clock abstracts time source for deterministic tests.
@@ -122,7 +124,7 @@ func NewAuthService(
 		intentStore:   intentStore,
 		linkStore:     linkStore,
 		sessionIssuer: sessionIssuer,
-		clock:         systemClock{},
+		clock:         timeutil.SystemClock{},
 		idGenerator:   UUIDGenerator{},
 		codeGenerator: SecureCodeGenerator{NumBytes: 16},
 		cfg:           DefaultConfig(),
@@ -188,7 +190,7 @@ func (s *AuthService) CreateIntent(ctx context.Context, in CreateIntentInput) (A
 		SubjectID:       strings.TrimSpace(in.SubjectID),
 		State:           IntentActive,
 		Identity:        identity,
-		Metadata:        copyStringMap(in.Metadata),
+		Metadata:        cloneutil.StringMap(in.Metadata),
 		RedemptionMode:  redemptionMode,
 		MaxRedemptions:  maxRedemptions,
 		RedemptionCount: 0,
@@ -394,8 +396,8 @@ func normalizeIdentity(identity *Identity, messenger Messenger) (*Identity, erro
 	out.Username = strings.TrimSpace(out.Username)
 	out.Name = strings.TrimSpace(out.Name)
 	out.Surname = strings.TrimSpace(out.Surname)
-	out.Attributes = copyStringMap(out.Attributes)
-	out.BirthDate = copyTime(out.BirthDate)
+	out.Attributes = cloneutil.StringMap(out.Attributes)
+	out.BirthDate = cloneutil.TimePtr(out.BirthDate)
 
 	return &out, nil
 }
@@ -406,20 +408,20 @@ func mergeIdentity(primary *Identity, secondary *Identity) *Identity {
 	}
 	if primary == nil {
 		out := *secondary
-		out.Attributes = copyStringMap(out.Attributes)
-		out.BirthDate = copyTime(out.BirthDate)
+		out.Attributes = cloneutil.StringMap(out.Attributes)
+		out.BirthDate = cloneutil.TimePtr(out.BirthDate)
 		return &out
 	}
 	if secondary == nil {
 		out := *primary
-		out.Attributes = copyStringMap(out.Attributes)
-		out.BirthDate = copyTime(out.BirthDate)
+		out.Attributes = cloneutil.StringMap(out.Attributes)
+		out.BirthDate = cloneutil.TimePtr(out.BirthDate)
 		return &out
 	}
 
 	out := *primary
-	out.Attributes = copyStringMap(primary.Attributes)
-	out.BirthDate = copyTime(primary.BirthDate)
+	out.Attributes = cloneutil.StringMap(primary.Attributes)
+	out.BirthDate = cloneutil.TimePtr(primary.BirthDate)
 
 	if strings.TrimSpace(secondary.Messenger.ID) != "" {
 		out.Messenger = NewMessenger(secondary.Messenger.ID)
@@ -437,7 +439,7 @@ func mergeIdentity(primary *Identity, secondary *Identity) *Identity {
 		out.Surname = strings.TrimSpace(secondary.Surname)
 	}
 	if secondary.BirthDate != nil {
-		out.BirthDate = copyTime(secondary.BirthDate)
+		out.BirthDate = cloneutil.TimePtr(secondary.BirthDate)
 	}
 	if len(secondary.Attributes) > 0 {
 		if out.Attributes == nil {
@@ -457,48 +459,23 @@ func ensureIdentityMessenger(identity *Identity, messenger Messenger) *Identity 
 		out.Messenger = messenger
 	}
 	out.Messenger = NewMessenger(out.Messenger.ID)
-	out.Attributes = copyStringMap(out.Attributes)
-	out.BirthDate = copyTime(out.BirthDate)
+	out.Attributes = cloneutil.StringMap(out.Attributes)
+	out.BirthDate = cloneutil.TimePtr(out.BirthDate)
 	return &out
 }
 
 func copyIntent(intent AuthIntent) AuthIntent {
 	out := intent
-	out.Metadata = copyStringMap(intent.Metadata)
-	out.ExpiresAt = copyTime(intent.ExpiresAt)
-	out.ConsumedAt = copyTime(intent.ConsumedAt)
+	out.Metadata = cloneutil.StringMap(intent.Metadata)
+	out.ExpiresAt = cloneutil.TimePtr(intent.ExpiresAt)
+	out.ConsumedAt = cloneutil.TimePtr(intent.ConsumedAt)
 	if intent.Identity != nil {
 		copiedIdentity := *intent.Identity
-		copiedIdentity.Attributes = copyStringMap(intent.Identity.Attributes)
-		copiedIdentity.BirthDate = copyTime(intent.Identity.BirthDate)
+		copiedIdentity.Attributes = cloneutil.StringMap(intent.Identity.Attributes)
+		copiedIdentity.BirthDate = cloneutil.TimePtr(intent.Identity.BirthDate)
 		out.Identity = &copiedIdentity
 	}
 	return out
-}
-
-func copyTime(in *time.Time) *time.Time {
-	if in == nil {
-		return nil
-	}
-	t := *in
-	return &t
-}
-
-func copyStringMap(in map[string]string) map[string]string {
-	if len(in) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
-}
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time {
-	return time.Now()
 }
 
 type UUIDGenerator struct{}
