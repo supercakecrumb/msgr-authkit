@@ -7,6 +7,23 @@ import (
 	"time"
 )
 
+type sequenceCodeGenerator struct {
+	codes []string
+	idx   int
+}
+
+func (g *sequenceCodeGenerator) NewCode() (string, error) {
+	if len(g.codes) == 0 {
+		return "", nil
+	}
+	if g.idx >= len(g.codes) {
+		return g.codes[len(g.codes)-1], nil
+	}
+	code := g.codes[g.idx]
+	g.idx++
+	return code, nil
+}
+
 func TestInMemorySessionIssuer_IssueAndValidate(t *testing.T) {
 	t.Parallel()
 
@@ -64,6 +81,63 @@ func TestInMemorySessionIssuer_ValidateExpired(t *testing.T) {
 	_, err = issuer.Validate(context.Background(), session.Token)
 	if !errors.Is(err, ErrSessionExpired) {
 		t.Fatalf("expected ErrSessionExpired, got %v", err)
+	}
+}
+
+func TestInMemorySessionIssuer_IssueFailsWhenTokenCollidesRepeatedly(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)}
+	issuer, err := NewInMemorySessionIssuer(
+		5*time.Minute,
+		WithSessionClock(clock),
+		WithSessionIDGenerator(staticIDGenerator{id: "sid-collision"}),
+		WithSessionTokenGenerator(staticCodeGenerator{code: "tok-collision"}),
+	)
+	if err != nil {
+		t.Fatalf("NewInMemorySessionIssuer() error = %v", err)
+	}
+
+	_, err = issuer.Issue(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("Issue() first call error = %v", err)
+	}
+
+	_, err = issuer.Issue(context.Background(), "user-2")
+	if !errors.Is(err, ErrCodeGenerationFailed) {
+		t.Fatalf("expected ErrCodeGenerationFailed, got %v", err)
+	}
+}
+
+func TestInMemorySessionIssuer_IssueRetriesOnTokenCollision(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)}
+	tokenGen := &sequenceCodeGenerator{codes: []string{"tok-dup", "tok-dup", "tok-new"}}
+	issuer, err := NewInMemorySessionIssuer(
+		5*time.Minute,
+		WithSessionClock(clock),
+		WithSessionIDGenerator(staticIDGenerator{id: "sid-retry"}),
+		WithSessionTokenGenerator(tokenGen),
+	)
+	if err != nil {
+		t.Fatalf("NewInMemorySessionIssuer() error = %v", err)
+	}
+
+	first, err := issuer.Issue(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("Issue() first call error = %v", err)
+	}
+	if first.Token != "tok-dup" {
+		t.Fatalf("expected tok-dup for first session, got %q", first.Token)
+	}
+
+	second, err := issuer.Issue(context.Background(), "user-2")
+	if err != nil {
+		t.Fatalf("Issue() second call error = %v", err)
+	}
+	if second.Token != "tok-new" {
+		t.Fatalf("expected tok-new after retry, got %q", second.Token)
 	}
 }
 

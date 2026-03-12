@@ -326,7 +326,10 @@ func (s *AuthService) resolveSubjectID(ctx context.Context, intent AuthIntent, i
 
 	link, err := s.linkStore.FindByIdentity(ctx, *identity)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrIdentityLinkNotFound, err)
+		if errors.Is(err, ErrIdentityLinkNotFound) {
+			return "", ErrIdentityLinkNotFound
+		}
+		return "", fmt.Errorf("authkit: resolve identity link: %w", err)
 	}
 
 	subjectID := strings.TrimSpace(link.AppUserID)
@@ -437,6 +440,9 @@ func mergeIdentity(primary *Identity, secondary *Identity) *Identity {
 		out.BirthDate = copyTime(secondary.BirthDate)
 	}
 	if len(secondary.Attributes) > 0 {
+		if out.Attributes == nil {
+			out.Attributes = make(map[string]string, len(secondary.Attributes))
+		}
 		for k, v := range secondary.Attributes {
 			out.Attributes[k] = v
 		}

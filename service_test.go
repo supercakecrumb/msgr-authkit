@@ -54,6 +54,21 @@ func (f *fakeSessionIssuer) Validate(ctx context.Context, token string) (WebSess
 	return WebSession{}, ErrSessionNotFound
 }
 
+type failingLinkStore struct {
+	err error
+}
+
+func (f failingLinkStore) FindByIdentity(ctx context.Context, identity Identity) (AccountLink, error) {
+	if err := ctx.Err(); err != nil {
+		return AccountLink{}, err
+	}
+	return AccountLink{}, f.err
+}
+
+func (f failingLinkStore) Upsert(ctx context.Context, link AccountLink) error {
+	return nil
+}
+
 func TestAuthService_CreateAndRedeem_OneTimeIntent(t *testing.T) {
 	t.Parallel()
 
@@ -172,6 +187,109 @@ func TestAuthService_Redeem_UsesLinkStoreWhenSubjectIsMissing(t *testing.T) {
 	}
 	if session.SubjectID != "app-user-42" {
 		t.Fatalf("expected app-user-42 subject, got %q", session.SubjectID)
+	}
+}
+
+func TestAuthService_Redeem_MergesSecondaryAttributesWithoutPanic(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)}
+	store := NewInMemoryIntentStore()
+	linkStore := NewInMemoryLinkStore()
+	issuer := &fakeSessionIssuer{}
+
+	err := linkStore.Upsert(context.Background(), AccountLink{
+		AppUserID: "app-user-merged",
+		Identity: Identity{
+			Messenger:       NewMessenger("telegram"),
+			MessengerUserID: "42",
+		},
+		LinkedAt: clock.now,
+	})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	service, err := NewAuthService(
+		store,
+		linkStore,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-merge-1"}),
+		WithCodeGenerator(staticCodeGenerator{code: "code-merge-1"}),
+		WithConfig(Config{DefaultIntentTTL: 0}),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	intent, err := service.CreateIntent(context.Background(), CreateIntentInput{
+		Messenger: NewMessenger("telegram"),
+		Identity: &Identity{
+			MessengerUserID: "42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateIntent() error = %v", err)
+	}
+
+	session, err := service.RedeemIntent(context.Background(), RedeemIntentInput{
+		Code:      intent.Code,
+		Messenger: NewMessenger("telegram"),
+		Identity: &Identity{
+			Attributes: map[string]string{
+				"locale": "en-US",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("RedeemIntent() error = %v", err)
+	}
+	if session.SubjectID != "app-user-merged" {
+		t.Fatalf("expected app-user-merged subject, got %q", session.SubjectID)
+	}
+}
+
+func TestAuthService_Redeem_DoesNotMaskUnexpectedLinkStoreErrors(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 12, 0, 0, 0, time.UTC)}
+	store := NewInMemoryIntentStore()
+	issuer := &fakeSessionIssuer{}
+	linkErr := fmt.Errorf("db unavailable")
+
+	service, err := NewAuthService(
+		store,
+		failingLinkStore{err: linkErr},
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-err-1"}),
+		WithCodeGenerator(staticCodeGenerator{code: "code-link-err-1"}),
+		WithConfig(Config{DefaultIntentTTL: 0}),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	intent, err := service.CreateIntent(context.Background(), CreateIntentInput{
+		Messenger: NewMessenger("telegram"),
+	})
+	if err != nil {
+		t.Fatalf("CreateIntent() error = %v", err)
+	}
+
+	_, err = service.RedeemIntent(context.Background(), RedeemIntentInput{
+		Code:      intent.Code,
+		Messenger: NewMessenger("telegram"),
+		Identity: &Identity{
+			MessengerUserID: "42",
+		},
+	})
+	if !errors.Is(err, linkErr) {
+		t.Fatalf("expected wrapped link store error, got %v", err)
+	}
+	if errors.Is(err, ErrIdentityLinkNotFound) {
+		t.Fatalf("expected non-not-found error classification, got %v", err)
 	}
 }
 

@@ -250,6 +250,8 @@ type InMemorySessionIssuer struct {
 	byToken  map[string]WebSession
 }
 
+const maxSessionTokenGenerationAttempts = 5
+
 type SessionIssuerOption func(*InMemorySessionIssuer) error
 
 func WithSessionClock(clock Clock) SessionIssuerOption {
@@ -320,29 +322,35 @@ func (s *InMemorySessionIssuer) Issue(ctx context.Context, appUserID string) (We
 	if sessionID == "" {
 		return WebSession{}, ErrIDGenerationFailed
 	}
-	token, err := s.tokenGen.NewCode()
-	if err != nil {
-		return WebSession{}, fmt.Errorf("%w: %v", ErrCodeGenerationFailed, err)
-	}
-	token = strings.TrimSpace(token)
-	if token == "" {
-		return WebSession{}, ErrCodeGenerationFailed
-	}
-
 	now := s.clock.Now().UTC()
-	session := WebSession{
-		SessionID: sessionID,
-		SubjectID: subject,
-		Token:     token,
-		IssuedAt:  now,
-		ExpiresAt: now.Add(s.ttl),
+	for i := 0; i < maxSessionTokenGenerationAttempts; i++ {
+		token, err := s.tokenGen.NewCode()
+		if err != nil {
+			return WebSession{}, fmt.Errorf("%w: %v", ErrCodeGenerationFailed, err)
+		}
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return WebSession{}, ErrCodeGenerationFailed
+		}
+
+		session := WebSession{
+			SessionID: sessionID,
+			SubjectID: subject,
+			Token:     token,
+			IssuedAt:  now,
+			ExpiresAt: now.Add(s.ttl),
+		}
+
+		s.mu.Lock()
+		if _, exists := s.byToken[token]; !exists {
+			s.byToken[token] = session
+			s.mu.Unlock()
+			return session, nil
+		}
+		s.mu.Unlock()
 	}
 
-	s.mu.Lock()
-	s.byToken[token] = session
-	s.mu.Unlock()
-
-	return session, nil
+	return WebSession{}, fmt.Errorf("%w: unable to generate unique session token", ErrCodeGenerationFailed)
 }
 
 func (s *InMemorySessionIssuer) Validate(ctx context.Context, token string) (WebSession, error) {
