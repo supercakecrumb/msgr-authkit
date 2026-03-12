@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -84,6 +85,21 @@ func (f failingLinkStore) FindByIdentity(ctx context.Context, identity Identity)
 
 func (f failingLinkStore) Upsert(ctx context.Context, link AccountLink) error {
 	return nil
+}
+
+type staticLinkProvisioner struct {
+	link AccountLink
+	err  error
+}
+
+func (p staticLinkProvisioner) ProvisionLink(ctx context.Context, identity Identity) (AccountLink, error) {
+	if err := ctx.Err(); err != nil {
+		return AccountLink{}, err
+	}
+	if p.err != nil {
+		return AccountLink{}, p.err
+	}
+	return p.link, nil
 }
 
 func TestAuthService_CreateAndRedeem_OneTimeIntent(t *testing.T) {
@@ -507,6 +523,313 @@ func TestAuthService_CreateIntent_CodeGeneratorFailure(t *testing.T) {
 	})
 	if !errors.Is(err, ErrCodeGenerationFailed) {
 		t.Fatalf("expected ErrCodeGenerationFailed, got %v", err)
+	}
+}
+
+func TestAuthService_CreateAndRedeemLoginLink_BotFirst(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 13, 0, 0, 0, time.UTC)}
+	intentStore := NewInMemoryIntentStore()
+	linkStore := NewInMemoryLinkStore()
+	issuer := &fakeSessionIssuer{}
+
+	err := linkStore.Upsert(context.Background(), AccountLink{
+		AppUserID: "app-user-42",
+		Identity: Identity{
+			Messenger:       NewMessenger("telegram"),
+			MessengerUserID: "42",
+			Username:        "neo",
+			Name:            "Thomas",
+			Surname:         "Anderson",
+		},
+		LinkedAt: clock.now,
+	})
+	if err != nil {
+		t.Fatalf("Upsert() error = %v", err)
+	}
+
+	service, err := NewAuthService(
+		intentStore,
+		linkStore,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-1"}),
+		WithCodeGenerator(staticCodeGenerator{code: "intent-code-1"}),
+		WithConfig(Config{DefaultIntentTTL: 0, DefaultLoginLinkTTL: 10 * time.Minute}),
+		WithLoginTokenCodec(HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}),
+		WithLoginLinkBuilder(QueryLoginLinkBuilder{
+			BaseURL:         "https://app.example/auth/complete",
+			TokenQueryParam: "login_token",
+		}),
+		WithMissingIdentityLinkMode(MissingIdentityLinkStrict),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	out, err := service.CreateLoginLink(context.Background(), CreateLoginLinkInput{
+		Messenger: NewMessenger("telegram"),
+		Identity: &Identity{
+			MessengerUserID: "42",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateLoginLink() error = %v", err)
+	}
+	if out.Intent.SubjectID != "app-user-42" {
+		t.Fatalf("expected resolved subject app-user-42, got %q", out.Intent.SubjectID)
+	}
+	if out.LinkToken == "" {
+		t.Fatal("expected non-empty link token")
+	}
+	parsed, err := url.Parse(out.LoginURL)
+	if err != nil {
+		t.Fatalf("url.Parse() error = %v", err)
+	}
+	if got := parsed.Query().Get("login_token"); got != out.LinkToken {
+		t.Fatalf("expected login_token query param to equal output token, got %q", got)
+	}
+
+	session, err := service.RedeemLoginLink(context.Background(), RedeemLoginLinkInput{
+		LinkToken: out.LinkToken,
+	})
+	if err != nil {
+		t.Fatalf("RedeemLoginLink() error = %v", err)
+	}
+	if session.SubjectID != "app-user-42" {
+		t.Fatalf("expected subject app-user-42, got %q", session.SubjectID)
+	}
+}
+
+func TestAuthService_CreateLoginLink_UsesAudienceResolver(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 13, 30, 0, 0, time.UTC)}
+	intentStore := NewInMemoryIntentStore()
+	issuer := &fakeSessionIssuer{}
+
+	service, err := NewAuthService(
+		intentStore,
+		nil,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-2"}),
+		WithCodeGenerator(staticCodeGenerator{code: "intent-code-2"}),
+		WithConfig(Config{DefaultIntentTTL: 0, DefaultLoginLinkTTL: 5 * time.Minute}),
+		WithLoginTokenCodec(HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}),
+		WithLoginLinkBuilder(QueryLoginLinkBuilder{BaseURL: "https://app.example/auth/complete"}),
+		WithAudienceResolver(AudienceResolverFunc(func(ctx context.Context, messenger Messenger, identity *Identity) (string, error) {
+			return "bot-start", nil
+		})),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	out, err := service.CreateLoginLink(context.Background(), CreateLoginLinkInput{
+		Messenger: NewMessenger("telegram"),
+		SubjectID: "user-1",
+	})
+	if err != nil {
+		t.Fatalf("CreateLoginLink() error = %v", err)
+	}
+	if out.Intent.Audience != "bot-start" {
+		t.Fatalf("expected audience bot-start, got %q", out.Intent.Audience)
+	}
+}
+
+func TestAuthService_CreateLoginLink_StrictMissingLinkFails(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 14, 0, 0, 0, time.UTC)}
+	intentStore := NewInMemoryIntentStore()
+	linkStore := NewInMemoryLinkStore()
+	issuer := &fakeSessionIssuer{}
+
+	service, err := NewAuthService(
+		intentStore,
+		linkStore,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-3"}),
+		WithCodeGenerator(staticCodeGenerator{code: "intent-code-3"}),
+		WithConfig(Config{DefaultIntentTTL: 0, DefaultLoginLinkTTL: 5 * time.Minute}),
+		WithLoginTokenCodec(HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}),
+		WithLoginLinkBuilder(QueryLoginLinkBuilder{BaseURL: "https://app.example/auth/complete"}),
+		WithMissingIdentityLinkMode(MissingIdentityLinkStrict),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	_, err = service.CreateLoginLink(context.Background(), CreateLoginLinkInput{
+		Messenger: NewMessenger("telegram"),
+		Identity: &Identity{
+			MessengerUserID: "missing",
+		},
+	})
+	if !errors.Is(err, ErrIdentityLinkNotFound) {
+		t.Fatalf("expected ErrIdentityLinkNotFound, got %v", err)
+	}
+}
+
+func TestAuthService_CreateLoginLink_AutoProvisionMissingLink(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 14, 30, 0, 0, time.UTC)}
+	intentStore := NewInMemoryIntentStore()
+	linkStore := NewInMemoryLinkStore()
+	issuer := &fakeSessionIssuer{}
+
+	provisioned := AccountLink{
+		AppUserID: "auto-user-99",
+		Identity: Identity{
+			Messenger:       NewMessenger("telegram"),
+			MessengerUserID: "99",
+		},
+		LinkedAt: clock.now,
+	}
+
+	service, err := NewAuthService(
+		intentStore,
+		linkStore,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-4"}),
+		WithCodeGenerator(staticCodeGenerator{code: "intent-code-4"}),
+		WithConfig(Config{DefaultIntentTTL: 0, DefaultLoginLinkTTL: 5 * time.Minute}),
+		WithLoginTokenCodec(HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}),
+		WithLoginLinkBuilder(QueryLoginLinkBuilder{BaseURL: "https://app.example/auth/complete"}),
+		WithMissingIdentityLinkMode(MissingIdentityLinkAutoProvision),
+		WithLinkProvisioner(staticLinkProvisioner{link: provisioned}),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	out, err := service.CreateLoginLink(context.Background(), CreateLoginLinkInput{
+		Messenger: NewMessenger("telegram"),
+		Identity: &Identity{
+			MessengerUserID: "99",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateLoginLink() error = %v", err)
+	}
+	if out.Intent.SubjectID != "auto-user-99" {
+		t.Fatalf("expected resolved subject auto-user-99, got %q", out.Intent.SubjectID)
+	}
+
+	persisted, err := linkStore.FindByIdentity(context.Background(), Identity{
+		Messenger:       NewMessenger("telegram"),
+		MessengerUserID: "99",
+	})
+	if err != nil {
+		t.Fatalf("FindByIdentity() error = %v", err)
+	}
+	if persisted.AppUserID != "auto-user-99" {
+		t.Fatalf("expected persisted app user id auto-user-99, got %q", persisted.AppUserID)
+	}
+}
+
+func TestAuthService_CreateLoginLink_NotConfigured(t *testing.T) {
+	t.Parallel()
+
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 15, 0, 0, 0, time.UTC)}
+	intentStore := NewInMemoryIntentStore()
+	issuer := &fakeSessionIssuer{}
+
+	service, err := NewAuthService(
+		intentStore,
+		nil,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-5"}),
+		WithCodeGenerator(staticCodeGenerator{code: "intent-code-5"}),
+		WithConfig(Config{DefaultIntentTTL: 0}),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	_, err = service.CreateLoginLink(context.Background(), CreateLoginLinkInput{
+		Messenger: NewMessenger("telegram"),
+		SubjectID: "user-1",
+	})
+	if !errors.Is(err, ErrLoginLinkNotConfigured) {
+		t.Fatalf("expected ErrLoginLinkNotConfigured, got %v", err)
+	}
+}
+
+func TestAuthService_RedeemLoginLink_InvalidToken(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryIntentStore()
+	issuer := &fakeSessionIssuer{}
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 15, 10, 0, 0, time.UTC)}
+
+	service, err := NewAuthService(
+		store,
+		nil,
+		issuer,
+		WithClock(clock),
+		WithLoginTokenCodec(HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	_, err = service.RedeemLoginLink(context.Background(), RedeemLoginLinkInput{
+		LinkToken: "broken.token.parts",
+	})
+	if !errors.Is(err, ErrLoginLinkInvalid) {
+		t.Fatalf("expected ErrLoginLinkInvalid, got %v", err)
+	}
+}
+
+func TestAuthService_RedeemLoginLink_ExpiredToken(t *testing.T) {
+	t.Parallel()
+
+	store := NewInMemoryIntentStore()
+	issuer := &fakeSessionIssuer{}
+	clock := &mutableClock{now: time.Date(2026, 3, 12, 15, 20, 0, 0, time.UTC)}
+
+	service, err := NewAuthService(
+		store,
+		nil,
+		issuer,
+		WithClock(clock),
+		WithIDGenerator(staticIDGenerator{id: "intent-link-6"}),
+		WithCodeGenerator(staticCodeGenerator{code: "intent-code-6"}),
+		WithLoginTokenCodec(HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}),
+	)
+	if err != nil {
+		t.Fatalf("NewAuthService() error = %v", err)
+	}
+
+	_, err = service.CreateIntent(context.Background(), CreateIntentInput{
+		Messenger: NewMessenger("telegram"),
+		SubjectID: "subject-6",
+	})
+	if err != nil {
+		t.Fatalf("CreateIntent() error = %v", err)
+	}
+
+	expiredToken, err := (HMACLoginTokenCodec{SigningKey: []byte("dev-signing-key")}).Encode(context.Background(), LoginTokenClaims{
+		IntentCode: "intent-code-6",
+		Messenger:  NewMessenger("telegram"),
+		ExpiresAt:  clock.now.Add(-1 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("Encode() error = %v", err)
+	}
+
+	_, err = service.RedeemLoginLink(context.Background(), RedeemLoginLinkInput{
+		LinkToken: expiredToken,
+	})
+	if !errors.Is(err, ErrLoginLinkExpired) {
+		t.Fatalf("expected ErrLoginLinkExpired, got %v", err)
 	}
 }
 

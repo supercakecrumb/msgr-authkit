@@ -18,6 +18,8 @@ type InMemoryIntentStore struct {
 	byCode map[string]string
 }
 
+// NewInMemoryIntentStore returns an empty in-memory intent store.
+// It is intended for tests and local development, not distributed production.
 func NewInMemoryIntentStore() *InMemoryIntentStore {
 	return &InMemoryIntentStore{
 		byID:   make(map[string]AuthIntent),
@@ -25,6 +27,7 @@ func NewInMemoryIntentStore() *InMemoryIntentStore {
 	}
 }
 
+// Create stores a new intent and rejects duplicate id or messenger+code pairs.
 func (s *InMemoryIntentStore) Create(ctx context.Context, intent AuthIntent) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -59,6 +62,7 @@ func (s *InMemoryIntentStore) Create(ctx context.Context, intent AuthIntent) err
 	return nil
 }
 
+// FindByCode returns intent by messenger+code pair.
 func (s *InMemoryIntentStore) FindByCode(ctx context.Context, messenger Messenger, code string) (AuthIntent, error) {
 	if err := ctx.Err(); err != nil {
 		return AuthIntent{}, err
@@ -81,6 +85,8 @@ func (s *InMemoryIntentStore) FindByCode(ctx context.Context, messenger Messenge
 	return copyIntent(intent), nil
 }
 
+// RecordRedemption validates current state and applies redemption mutation.
+// It updates IntentExpired/IntentRevoked state where appropriate.
 func (s *InMemoryIntentStore) RecordRedemption(ctx context.Context, intentID string, redeemedAt time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -138,6 +144,7 @@ func (s *InMemoryIntentStore) RecordRedemption(ctx context.Context, intentID str
 	return nil
 }
 
+// DeleteExpired removes all intents whose ExpiresAt is before now.
 func (s *InMemoryIntentStore) DeleteExpired(ctx context.Context, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -171,12 +178,14 @@ type InMemoryLinkStore struct {
 	links map[string]AccountLink
 }
 
+// NewInMemoryLinkStore returns an empty in-memory link store.
 func NewInMemoryLinkStore() *InMemoryLinkStore {
 	return &InMemoryLinkStore{
 		links: make(map[string]AccountLink),
 	}
 }
 
+// FindByIdentity returns linked internal account for a messenger identity.
 func (s *InMemoryLinkStore) FindByIdentity(ctx context.Context, identity Identity) (AccountLink, error) {
 	if err := ctx.Err(); err != nil {
 		return AccountLink{}, err
@@ -196,6 +205,8 @@ func (s *InMemoryLinkStore) FindByIdentity(ctx context.Context, identity Identit
 	return copyLink(link), nil
 }
 
+// Upsert creates or updates an identity mapping.
+// If LinkedAt is zero, current UTC time is assigned.
 func (s *InMemoryLinkStore) Upsert(ctx context.Context, link AccountLink) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -255,8 +266,10 @@ type InMemorySessionIssuer struct {
 
 const maxSessionTokenGenerationAttempts = 5
 
+// SessionIssuerOption configures InMemorySessionIssuer.
 type SessionIssuerOption func(*InMemorySessionIssuer) error
 
+// WithSessionClock overrides session time source.
 func WithSessionClock(clock Clock) SessionIssuerOption {
 	return func(s *InMemorySessionIssuer) error {
 		if clock == nil {
@@ -267,6 +280,7 @@ func WithSessionClock(clock Clock) SessionIssuerOption {
 	}
 }
 
+// WithSessionIDGenerator overrides session id generation.
 func WithSessionIDGenerator(gen IDGenerator) SessionIssuerOption {
 	return func(s *InMemorySessionIssuer) error {
 		if gen == nil {
@@ -277,6 +291,7 @@ func WithSessionIDGenerator(gen IDGenerator) SessionIssuerOption {
 	}
 }
 
+// WithSessionTokenGenerator overrides opaque session token generation.
 func WithSessionTokenGenerator(gen CodeGenerator) SessionIssuerOption {
 	return func(s *InMemorySessionIssuer) error {
 		if gen == nil {
@@ -287,6 +302,8 @@ func WithSessionTokenGenerator(gen CodeGenerator) SessionIssuerOption {
 	}
 }
 
+// NewInMemorySessionIssuer returns an in-memory session issuer with given TTL.
+// It is suitable for tests and local environments.
 func NewInMemorySessionIssuer(ttl time.Duration, opts ...SessionIssuerOption) (*InMemorySessionIssuer, error) {
 	if ttl <= 0 {
 		return nil, fmt.Errorf("%w: session ttl must be > 0", ErrInvalidInput)
@@ -312,6 +329,7 @@ func NewInMemorySessionIssuer(ttl time.Duration, opts ...SessionIssuerOption) (*
 	return issuer, nil
 }
 
+// Issue creates a new opaque session for app user id.
 func (s *InMemorySessionIssuer) Issue(ctx context.Context, appUserID string) (WebSession, error) {
 	if err := ctx.Err(); err != nil {
 		return WebSession{}, err
@@ -356,6 +374,8 @@ func (s *InMemorySessionIssuer) Issue(ctx context.Context, appUserID string) (We
 	return WebSession{}, fmt.Errorf("%w: unable to generate unique session token", ErrCodeGenerationFailed)
 }
 
+// Validate returns session for token if it exists and is not expired.
+// Expired sessions are removed from in-memory state.
 func (s *InMemorySessionIssuer) Validate(ctx context.Context, token string) (WebSession, error) {
 	if err := ctx.Err(); err != nil {
 		return WebSession{}, err

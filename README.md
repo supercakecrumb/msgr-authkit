@@ -15,6 +15,11 @@ Use `authkit` when you want this flow:
 3. Redeem the code once (or multiple times, if configured).
 4. Issue a web session token.
 
+Bot-first flow is also supported:
+1. User starts in messenger (`/start` / `/login`).
+2. App creates signed login link via `CreateLoginLink`.
+3. User opens link and backend redeems via `RedeemLoginLink`.
+
 ## Core Concepts
 
 - `Messenger`: normalized messenger identifier (string-based, fully configurable).
@@ -132,6 +137,35 @@ intent, _ := service.CreateIntent(ctx, authkit.CreateIntentInput{
 })
 ```
 
+## Bot-First Login Link
+
+```go
+service, _ := authkit.NewAuthService(
+	intentStore,
+	linkStore,
+	sessionIssuer,
+	authkit.WithSignedQueryLoginLinks(
+		"https://app.example/auth/complete",
+		[]byte("replace-with-long-random-secret"),
+		"auth_token",
+	),
+	authkit.WithMissingIdentityLinkMode(authkit.MissingIdentityLinkStrict),
+)
+
+login, _ := service.CreateLoginLink(ctx, authkit.CreateLoginLinkInput{
+	Messenger: authkit.NewMessenger("telegram"),
+	Identity: &authkit.Identity{
+		MessengerUserID: "123456",
+	},
+})
+
+// Send login.LoginURL to user in messenger chat.
+session, _ := service.RedeemLoginLink(ctx, authkit.RedeemLoginLinkInput{
+	LinkToken: login.LinkToken,
+})
+_ = session
+```
+
 ## Extending for Production
 
 Implement these interfaces:
@@ -174,6 +208,9 @@ Use `errors.Is` with sentinels from `errors.go`:
 - `ErrIdentityLinkNotFound`
 - `ErrSessionNotFound`
 - `ErrSessionExpired`
+- `ErrLoginLinkNotConfigured`
+- `ErrLoginLinkInvalid`
+- `ErrLoginLinkExpired`
 
 ## Notes
 
