@@ -1,60 +1,106 @@
 # authkit
 
-`authkit` is a small Go package for passwordless web authentication via messenger-driven identity.
+`authkit` is a transport-agnostic Go library for passwordless auth driven by messenger identity.
 
-It is transport-agnostic and framework-agnostic:
-- no HTTP dependency
-- no Telegram/Discord hardcoding
+Design goals:
+- no HTTP framework dependency
+- no Telegram/Discord coupling in core
 - works in monoliths and microservices
+- explicit interfaces for persistence/session issuance
 
-## Purpose
+## Who This README Is For
 
-Use `authkit` when you want this flow:
-1. Create an auth intent (`code`) for a messenger context.
-2. Deliver that code through any channel.
-3. Redeem the code once (or multiple times, if configured).
-4. Issue a web session token.
+If you are an AI agent (or a developer) integrating this package, this file is intended to be enough to implement a working auth flow without reading package internals.
 
-Bot-first flow is also supported:
-1. User starts in messenger (`/start` / `/login`).
-2. App creates signed login link via `CreateLoginLink`.
-3. User opens link and backend redeems via `RedeemLoginLink`.
+## Import Path
 
-## Core Concepts
+```go
+import authkit "github.com/supercakecrumb/msgr-authkit"
+```
 
-- `Messenger`: normalized messenger identifier (string-based, fully configurable).
-- `Identity`: optional profile from messenger (`Username`, `Name`, `Surname`, `BirthDate`, custom `Attributes`).
-- `AuthIntent`: redeemable challenge with TTL and redemption policy.
-- `AccountLink`: mapping from messenger identity to internal app user.
-- `WebSession`: auth result issued by your `SessionIssuer`.
+## Fast Mental Model
 
-## What authkit guarantees
+`authkit` has two primary flows:
 
-- Input normalization/validation.
-- One-time or reusable intent policies.
-- Optional expiry (`ExpiresAt`) with default TTL support.
-- Replay prevention based on store redemption state.
-- Deterministic behavior via injectable clock/id/code generators.
+1. **Intent flow (code-first)**
+- create auth intent (`CreateIntent`)
+- deliver intent code by any channel
+- redeem code (`RedeemIntent`)
+- get `WebSession`
 
-## Package Structure
+2. **Bot-first login-link flow**
+- user starts in messenger (`/start`, `/login`)
+- app creates signed login link (`CreateLoginLink`)
+- user opens link in browser
+- backend redeems token (`RedeemLoginLink`)
+- get `WebSession`
 
-- `types.go`: domain structs and interfaces.
-- `service.go`: core auth logic (`NewAuthService`, `CreateIntent`, `RedeemIntent`).
-- `inmemory.go`: ready-to-use in-memory adapters for local/dev/tests.
-- `errors.go`: typed sentinel errors for `errors.Is`.
+## Core Types You Need
 
-## Quick Start (in-memory)
+- `Messenger`: normalized messenger identifier
+- `Identity`: messenger user profile data
+- `AuthIntent`: challenge/token state with redemption policy
+- `AccountLink`: mapping `messenger identity -> internal app user id`
+- `WebSession`: result returned by your `SessionIssuer`
+
+## Required Interfaces (Production)
+
+You must provide:
+- `IntentStore`
+- `SessionIssuer`
+
+You usually provide:
+- `LinkStore` (needed when subject is not known at create time)
+
+Optional for bot-first:
+- `LoginTokenCodec`, `LoginLinkBuilder` (or just use `WithSignedQueryLoginLinks`)
+- `AudienceResolver`
+- `LinkProvisioner`
+
+## What authkit Guarantees
+
+- input normalization/validation
+- one-time or reusable intent policy enforcement
+- expiration checks (intent + login-link token)
+- deterministic behavior via injectable clock/code/id generators
+- security-first redeem ordering (consume intent before issuing session)
+
+## Integration Protocol (Agent Checklist)
+
+1. Choose flow:
+- `CreateIntent/RedeemIntent` if your UI starts in web.
+- `CreateLoginLink/RedeemLoginLink` if your UI starts in messenger.
+
+2. Decide subject resolution strategy:
+- known `SubjectID` at create time, or
+- resolve via `LinkStore`, or
+- auto-provision via `WithMissingIdentityLinkMode(MissingIdentityLinkAutoProvision)` + `WithLinkProvisioner`.
+
+3. Wire service:
+- instantiate stores + session issuer
+- call `NewAuthService(...)`
+- apply `WithConfig(...)`
+- for bot-first add `WithSignedQueryLoginLinks(...)`
+
+4. Implement error mapping:
+- map sentinel errors to HTTP statuses / user-visible messages with `errors.Is`.
+
+5. Add tests:
+- intent create/redeem happy path
+- replay and expiration cases
+- missing link behavior by mode
+
+## Minimal In-Memory Example
 
 ```go
 package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
-	"github.com/supercakecrumb/adhd-game-bot/authkit"
+	authkit "github.com/supercakecrumb/msgr-authkit"
 )
 
 func main() {
@@ -66,13 +112,11 @@ func main() {
 
 	service, _ := authkit.NewAuthService(intentStore, linkStore, sessionIssuer)
 
-	// Link messenger identity -> your internal user id.
 	_ = linkStore.Upsert(ctx, authkit.AccountLink{
 		AppUserID: "user-42",
 		Identity: authkit.Identity{
 			Messenger:       authkit.NewMessenger("telegram"),
 			MessengerUserID: "123456",
-			Username:        "jane",
 		},
 		LinkedAt: time.Now().UTC(),
 	})
@@ -80,64 +124,19 @@ func main() {
 	intent, _ := service.CreateIntent(ctx, authkit.CreateIntentInput{
 		Messenger: authkit.NewMessenger("telegram"),
 		Audience:  "web",
-		// SubjectID optional: if omitted, authkit resolves it from LinkStore.
 	})
 
-	session, err := service.RedeemIntent(ctx, authkit.RedeemIntentInput{
+	session, _ := service.RedeemIntent(ctx, authkit.RedeemIntentInput{
 		Code:      intent.Code,
 		Messenger: authkit.NewMessenger("telegram"),
-		Identity: &authkit.Identity{
-			MessengerUserID: "123456",
-		},
+		Identity:  &authkit.Identity{MessengerUserID: "123456"},
 	})
-	if err != nil {
-		panic(err)
-	}
 
-	fmt.Println("session token:", session.Token)
-
-	// Redeeming again fails for one-time intents.
-	_, err = service.RedeemIntent(ctx, authkit.RedeemIntentInput{
-		Code:      intent.Code,
-		Messenger: authkit.NewMessenger("telegram"),
-		Identity: &authkit.Identity{
-			MessengerUserID: "123456",
-		},
-	})
-	if errors.Is(err, authkit.ErrIntentAlreadyRedeemed) {
-		fmt.Println("already redeemed")
-	}
+	fmt.Println(session.Token)
 }
 ```
 
-## Known Subject Flow (no identity needed)
-
-If your app already knows internal user ID at intent creation time:
-
-```go
-intent, _ := service.CreateIntent(ctx, authkit.CreateIntentInput{
-	Messenger: authkit.NewMessenger("discord"),
-	SubjectID: "internal-user-99",
-})
-
-session, _ := service.RedeemIntent(ctx, authkit.RedeemIntentInput{
-	Code:      intent.Code,
-	Messenger: authkit.NewMessenger("discord"),
-})
-```
-
-## Reusable / Static Intent
-
-```go
-intent, _ := service.CreateIntent(ctx, authkit.CreateIntentInput{
-	Messenger:      authkit.NewMessenger("slack"),
-	SubjectID:      "user-1",
-	RedemptionMode: authkit.IntentReusable,
-	MaxRedemptions: 10, // 0 means unlimited for reusable intents
-})
-```
-
-## Bot-First Login Link
+## Bot-First (Recommended Minimal Setup)
 
 ```go
 service, _ := authkit.NewAuthService(
@@ -145,75 +144,117 @@ service, _ := authkit.NewAuthService(
 	linkStore,
 	sessionIssuer,
 	authkit.WithSignedQueryLoginLinks(
-		"https://app.example/auth/complete",
+		"https://app.example/auth/redeem", // public URL
 		[]byte("replace-with-long-random-secret"),
 		"auth_token",
 	),
-	authkit.WithMissingIdentityLinkMode(authkit.MissingIdentityLinkStrict),
+	authkit.WithMissingIdentityLinkMode(authkit.MissingIdentityLinkAutoProvision),
+	authkit.WithLinkProvisioner(authkit.LinkProvisionerFunc(
+		func(ctx context.Context, identity authkit.Identity) (authkit.AccountLink, error) {
+			return authkit.AccountLink{
+				AppUserID: "tg:" + identity.MessengerUserID,
+				Identity:  identity,
+				LinkedAt:  time.Now().UTC(),
+			}, nil
+		},
+	)),
 )
 
 login, _ := service.CreateLoginLink(ctx, authkit.CreateLoginLinkInput{
 	Messenger: authkit.NewMessenger("telegram"),
 	Identity: &authkit.Identity{
+		Messenger:       authkit.NewMessenger("telegram"),
 		MessengerUserID: "123456",
 	},
 })
 
-// Send login.LoginURL to user in messenger chat.
-session, _ := service.RedeemLoginLink(ctx, authkit.RedeemLoginLinkInput{
-	LinkToken: login.LinkToken,
-})
+// send login.LoginURL via bot
+session, _ := service.RedeemLoginLink(ctx, authkit.RedeemLoginLinkInput{LinkToken: login.LinkToken})
 _ = session
 ```
 
-## Extending for Production
+## Config Defaults
 
-Implement these interfaces:
+`DefaultConfig()` currently means:
+- `DefaultIntentTTL = 15m`
+- `DefaultRedemptionMode = IntentOneTime`
+- `DefaultReusableMaxRedemptions = 0` (unlimited if reusable)
+- `DefaultLoginLinkTTL = 5m`
 
-- `IntentStore`: persist intents in SQL/Redis.
-- `LinkStore`: resolve messenger identity to app user.
-- `SessionIssuer`: issue/validate JWT or opaque sessions.
+Override with `WithConfig(...)`.
 
-Optional:
-- `ChannelAdapter`: delivery integration (send the intent code/link via messenger).
+## Missing Identity Link Modes
 
-### Service wiring
+When creating login links with identity but no existing `LinkStore` mapping:
 
-```go
-intentStore := NewPostgresIntentStore(db)
-linkStore := NewPostgresLinkStore(db)
-sessionIssuer := NewJWTIssuer(signingKey)
+- `MissingIdentityLinkDeferred`
+  - allow create now, resolve subject later during redeem
+- `MissingIdentityLinkStrict`
+  - fail immediately with `ErrIdentityLinkNotFound`
+- `MissingIdentityLinkAutoProvision`
+  - call `LinkProvisioner`, optional `LinkStore.Upsert`
 
-service, err := authkit.NewAuthService(
-	intentStore,
-	linkStore,
-	sessionIssuer,
-	authkit.WithConfig(authkit.Config{
-		DefaultIntentTTL:              10 * time.Minute,
-		DefaultRedemptionMode:         authkit.IntentOneTime,
-		DefaultReusableMaxRedemptions: 0,
-	}),
-)
-```
+## Error Handling Contract
 
-## Error Handling
-
-Use `errors.Is` with sentinels from `errors.go`:
+Use `errors.Is(err, ...)` with sentinels:
 - `ErrInvalidInput`
 - `ErrIntentNotFound`
+- `ErrIntentNotActive`
 - `ErrIntentExpired`
 - `ErrIntentAlreadyRedeemed`
 - `ErrIntentRedemptionLimitReached`
 - `ErrSubjectUnresolved`
 - `ErrIdentityLinkNotFound`
+- `ErrCodeGenerationFailed`
+- `ErrIDGenerationFailed`
 - `ErrSessionNotFound`
 - `ErrSessionExpired`
 - `ErrLoginLinkNotConfigured`
 - `ErrLoginLinkInvalid`
 - `ErrLoginLinkExpired`
 
-## Notes
+Suggested HTTP mapping:
+- invalid input: `400`
+- not found/invalid token: `404`/`401`
+- expired/redeemed: `409` or `401` depending on UX
+- unresolved subject/link missing: `422` or `401`
 
-- `NewMessenger(" TeLeGrAm ")` normalizes to `"telegram"`.
-- `Identity` is optional: web flows can work without profile attributes.
-- Redeem path consumes intent before issuing session (security-first). If session issuance fails, create a new intent.
+## Production Implementation Notes
+
+- `IntentStore.RecordRedemption` should be atomic (transaction/compare-and-swap) to prevent replay races.
+- Normalize messenger IDs with `NewMessenger` everywhere.
+- Keep login-link signing key long/random and rotated.
+- Keep login-link TTL short.
+- Prefer one-time intents for auth links.
+- Ensure bot-to-web internal endpoint is authenticated.
+- For Telegram URL buttons, prefer public `https` URLs.
+
+## Testing Matrix (Minimum)
+
+1. one-time intent can be redeemed once
+2. second redeem returns `ErrIntentAlreadyRedeemed`
+3. expired intent returns `ErrIntentExpired`
+4. missing subject and missing link returns `ErrSubjectUnresolved`/`ErrIdentityLinkNotFound`
+5. bot-first invalid token returns `ErrLoginLinkInvalid`
+6. bot-first expired token returns `ErrLoginLinkExpired`
+
+## Package Map
+
+- `types.go`: domain models + interfaces
+- `service.go`: `AuthService` + options + bot-first helpers
+- `inmemory.go`: in-memory adapters for demos/tests
+- `errors.go`: sentinel errors for `errors.Is`
+
+## Quick FAQ
+
+**Do I need to use Telegram?**
+No. Messenger is just a normalized string ID.
+
+**Can I use JWT sessions?**
+Yes. Implement `SessionIssuer` with JWT issuance/validation.
+
+**Can I skip LinkStore?**
+Yes if you always pass `SubjectID` during create.
+
+**Can I keep intents reusable?**
+Yes via `IntentReusable`, but one-time is safer for login.
