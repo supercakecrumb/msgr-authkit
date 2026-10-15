@@ -162,7 +162,9 @@ type RedeemIntentInput struct {
 	// Required, unless Identity.Messenger is provided.
 	Messenger Messenger
 	// Identity optionally provides fresh profile data at redemption time.
-	// It is merged with stored intent identity for subject resolution.
+	// It is merged with stored intent identity for subject resolution, but cannot
+	// change a messenger user ID already bound at creation. Callers must verify
+	// any identity supplied for an intent that has no bound identity.
 	Identity *Identity
 }
 

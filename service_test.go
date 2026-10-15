@@ -962,3 +962,29 @@ func TestInMemoryLinkStore_FindByIdentity_NotFound(t *testing.T) {
 		t.Fatalf("expected ErrIdentityLinkNotFound, got %v", err)
 	}
 }
+
+func TestRedeemCannotChangeBoundIdentity(t *testing.T) {
+	ctx := context.Background()
+	messenger := NewMessenger("telegram")
+	links := NewInMemoryLinkStore()
+	for _, id := range []string{"owner", "other"} {
+		if err := links.Upsert(ctx, AccountLink{AppUserID: id, Identity: Identity{Messenger: messenger, MessengerUserID: id}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc, err := NewAuthService(NewInMemoryIntentStore(), links, &fakeSessionIssuer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := svc.CreateIntent(ctx, CreateIntentInput{Messenger: messenger, Identity: &Identity{MessengerUserID: "owner"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.RedeemIntent(ctx, RedeemIntentInput{Messenger: messenger, Code: intent.Code, Identity: &Identity{MessengerUserID: "other"}}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatal("identity substitution was accepted")
+	}
+	session, err := svc.RedeemIntent(ctx, RedeemIntentInput{Messenger: messenger, Code: intent.Code, Identity: &Identity{MessengerUserID: "owner"}})
+	if err != nil || session.SubjectID != "owner" {
+		t.Fatal("rejected identity substitution consumed or changed original intent")
+	}
+}

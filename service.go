@@ -674,6 +674,14 @@ func (s *AuthService) resolveExpiresAt(in *time.Time, now time.Time) (*time.Time
 }
 
 func (s *AuthService) resolveSubjectID(ctx context.Context, intent AuthIntent, inputIdentity *Identity) (string, error) {
+	if intent.Identity != nil && inputIdentity != nil {
+		bound := strings.TrimSpace(intent.Identity.MessengerUserID)
+		supplied := strings.TrimSpace(inputIdentity.MessengerUserID)
+		if bound != "" && supplied != "" && bound != supplied {
+			return "", fmt.Errorf("%w: redemption identity does not match intent", ErrInvalidInput)
+		}
+	}
+
 	if subjectID := strings.TrimSpace(intent.SubjectID); subjectID != "" {
 		return subjectID, nil
 	}
